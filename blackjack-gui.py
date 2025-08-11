@@ -46,6 +46,7 @@ A_STAND = "STAND"
 A_DOUBLE = "DOUBLE"
 A_INSURANCE = "INSURANCE"           # take insurance (half bet)
 A_SKIP_INSURANCE = "SKIP_INSURANCE" # decline insurance
+A_SPLIT = "SPLIT"                   # (GUI-only; env offers no SPLIT to AIs)
 
 @dataclass(frozen=True)
 class BJState:
@@ -116,6 +117,7 @@ class Blackjack:
         acts = [A_HIT, A_STAND]
         if s.can_double:
             acts.append(A_DOUBLE)
+        # NOTE: We intentionally do NOT expose A_SPLIT here for AIs.
         return acts
 
     def is_terminal(self, s: BJState) -> bool:
@@ -549,7 +551,7 @@ def reconstruct_final_dealer(game: Blackjack) -> Tuple[str, ...]:
     return game._round_final_dealer or ('?', '?')
 
 # =========================
-# Tkinter GUI for Human vs 3 AI players (with card pictures)
+# Tkinter GUI for Human vs 3 AI players (with card pictures + SPLIT)
 # =========================
 
 import tkinter as tk
@@ -638,12 +640,18 @@ class BlackjackGUI:
         self.settled_this_round: Dict[str, bool] = {}
         self.human_actions: List[str] = []
 
+        # Human split control
+        self.human_split = False
+        self.human_hands: List[BJState] = []            # if split: [hand1_state, hand2_state]
+        self.human_actions_per_hand: List[List[str]] = []
+        self.human_active_index: int = 0                # which hand is currently being played
+
         # Build UI
         self._build_ui()
 
     # ---------- UI Layout ----------
     def _build_ui(self):
-        self.root.geometry("1040x760")
+        self.root.geometry("1060x800")
         container = ttk.Frame(self.root, padding=10)
         container.pack(fill="both", expand=True)
 
@@ -703,6 +711,11 @@ class BlackjackGUI:
             self.pframes[tag]['card_area'] = cards_row
 
             if tag == "Human":
+                info = ttk.Frame(frame)
+                info.pack(fill="x", pady=(4,0))
+                self.human_hand_info = ttk.Label(info, text="", font=("Consolas", 11))
+                self.human_hand_info.pack(side="left", padx=6)
+
                 btns = ttk.Frame(frame)
                 btns.pack(fill="x", pady=(8,0))
                 self.btn_ins = ttk.Button(btns, text="Insurance", command=lambda: self.on_human_action(A_INSURANCE))
@@ -710,7 +723,9 @@ class BlackjackGUI:
                 self.btn_hit = ttk.Button(btns, text="Hit", command=lambda: self.on_human_action(A_HIT))
                 self.btn_stand = ttk.Button(btns, text="Stand", command=lambda: self.on_human_action(A_STAND))
                 self.btn_double = ttk.Button(btns, text="Double", command=lambda: self.on_human_action(A_DOUBLE))
-                for b in (self.btn_ins, self.btn_skip_ins, self.btn_hit, self.btn_stand, self.btn_double):
+                self.btn_split = ttk.Button(btns, text="Split", command=self.on_human_split)
+
+                for b in (self.btn_ins, self.btn_skip_ins, self.btn_hit, self.btn_stand, self.btn_double, self.btn_split):
                     b.pack(side="left", padx=5)
             else:
                 # No buttons for AI players
@@ -724,14 +739,15 @@ class BlackjackGUI:
         self._set_human_buttons(enabled=False)
 
     # ---------- Helpers ----------
-    def _set_human_buttons(self, enabled: bool, insurance_phase: Optional[bool]=None, can_double: bool=False):
+    def _set_human_buttons(self, enabled: bool, insurance_phase: Optional[bool]=None, can_double: bool=False, can_split: bool=False):
         state = ("!disabled" if enabled else "disabled")
         # Default disable/enable all
         for b in (getattr(self, 'btn_ins', None),
                   getattr(self, 'btn_skip_ins', None),
                   getattr(self, 'btn_hit', None),
                   getattr(self, 'btn_stand', None),
-                  getattr(self, 'btn_double', None)):
+                  getattr(self, 'btn_double', None),
+                  getattr(self, 'btn_split', None)):
             if b: b.state([state])
 
         # If enabled, refine based on phase
@@ -741,16 +757,32 @@ class BlackjackGUI:
                 self.btn_hit.state(["disabled"])
                 self.btn_stand.state(["disabled"])
                 self.btn_double.state(["disabled"])
+                self.btn_split.state(["disabled"])
             else:
                 # Regular actions
                 self.btn_ins.state(["disabled"])
                 self.btn_skip_ins.state(["disabled"])
                 if not can_double:
                     self.btn_double.state(["disabled"])
+                if not can_split:
+                    self.btn_split.state(["disabled"])
 
     def _append_log(self, msg: str):
         self.log.insert("end", msg + "\n")
         self.log.see("end")
+
+    def _human_can_split_now(self, s: BJState) -> bool:
+        if self.human_split:
+            return False  # no resplit
+        if s.insurance_allowed:
+            return False
+        if len(s.player_cards) != 2:
+            return False
+        r1, r2 = s.player_cards
+        # Pair only if same rank (treat all ten-value as same only when ranks equal; keeps it simple)
+        if r1 != r2:
+            return False
+        return True
 
     # ---------- Round lifecycle ----------
     def start_round(self):
@@ -769,6 +801,11 @@ class BlackjackGUI:
         self.actions_taken.clear()
         self.settled_this_round = {t: False for t in self.tags}
         self.human_actions = []
+        self.human_split = False
+        self.human_hands = []
+        self.human_actions_per_hand = []
+        self.human_active_index = 0
+        self.human_hand_info.config(text="")
 
         # Clear UI fields
         for tag in self.tags:
@@ -869,50 +906,163 @@ class BlackjackGUI:
         self.actions_taken["Expecti-Win"] = a3
 
     def _refresh_human_controls(self):
-        s = self.start_states["Human"]
+        # Determine which state is active for the human (split vs normal)
+        if self.human_split:
+            s = self.human_hands[self.human_active_index]
+            label = f"Playing Hand {self.human_active_index+1}/2"
+            self.human_hand_info.config(text=label)
+        else:
+            s = self.start_states["Human"]
+            self.human_hand_info.config(text="")
+
         if self.game.is_terminal(s):
-            # Naturals resolved (e.g., blackjack situation after insurance decision)
-            self._finalize_round_if_done(human_final=s, human_actions=self.human_actions)
+            # If terminal, either move to next split hand or finalize round
+            if self.human_split and self.human_active_index == 0:
+                self._advance_to_next_split_hand()
+            else:
+                # Naturals resolved or hand complete
+                final_state = s if self.human_split else self.start_states["Human"]
+                self._finalize_round_if_done(human_final=final_state, human_actions=self.human_actions)
             return
+
         if s.insurance_allowed:
             self._set_human_buttons(True, insurance_phase=True)
         else:
             can_double = s.can_double
-            self._set_human_buttons(True, insurance_phase=False, can_double=can_double)
+            can_split = (not self.human_split) and self._human_can_split_now(s)
+            self._set_human_buttons(True, insurance_phase=False, can_double=can_double, can_split=can_split)
 
     # ---------- Human actions ----------
-    def on_human_action(self, action: str):
+    def on_human_split(self):
+        """Handle SPLIT for the human only (single split; no resplit)."""
+        if self.human_split:
+            return
         s = self.start_states["Human"]
+        if not self._human_can_split_now(s):
+            self._append_log("(Split not available.)")
+            return
+
+        # Build two hand states from the current one; draw one replacement card for each hand.
+        shoe = s.shoe_counter()
+        r1, r2 = s.player_cards
+
+        # First hand: starts with r1, draw a card
+        c1, shoe = self.game._draw_from_shoe(shoe)
+        hand1 = BJState(
+            to_move='Player',
+            player_cards=(r1, c1),
+            dealer_cards=s.dealer_cards,
+            shoe=tuple(sorted(shoe.items())),
+            base_bet=s.base_bet,
+            bet_mult=1,
+            can_double=True,
+            resolved=False,
+            insurance_bet=0,
+            insurance_allowed=False
+        )
+
+        # Second hand: draw from updated shoe for its extra card
+        c2, shoe2 = self.game._draw_from_shoe(Counter(dict(hand1.shoe)))
+        hand2 = BJState(
+            to_move='Player',
+            player_cards=(r2, c2),
+            dealer_cards=s.dealer_cards,
+            shoe=tuple(sorted(shoe2.items())),
+            base_bet=s.base_bet,
+            bet_mult=1,
+            can_double=True,
+            resolved=False,
+            insurance_bet=0,
+            insurance_allowed=False
+        )
+
+        self.human_split = True
+        self.human_hands = [hand1, hand2]
+        self.human_actions_per_hand = [[], []]
+        self.human_active_index = 0
+        self.human_actions = ["SPLIT"]
+        # Render current active hand (hand 1)
+        v, _ = hand_value(hand1.player_cards)
+        CardRenderer.render_hand(self.pframes["Human"]['card_area'], hand1.player_cards)
+        self.pframes["Human"]['total'].config(text=f"Total: {v}")
+        self.pframes["Human"]['actions'].config(text=f"Actions: {self.human_actions + self.human_actions_per_hand[0]}")
+        self._append_log(f"Human SPLIT -> Hand1 {hand1.player_cards}, Hand2 {hand2.player_cards}")
+        self._refresh_human_controls()
+
+    def _advance_to_next_split_hand(self):
+        """Move from hand 1 to hand 2 after finishing hand 1."""
+        if not self.human_split:
+            return
+        if self.human_active_index == 0:
+            # Move to second hand
+            self.human_active_index = 1
+            s = self.human_hands[1]
+            v, _ = hand_value(s.player_cards)
+            CardRenderer.render_hand(self.pframes["Human"]['card_area'], s.player_cards)
+            self.pframes["Human"]['total'].config(text=f"Total: {v}")
+            self.pframes["Human"]['actions'].config(text=f"Actions: {self.human_actions + self.human_actions_per_hand[1]}")
+            self._append_log(f"Now playing split Hand 2: {s.player_cards} (Total {v})")
+            self._refresh_human_controls()
+        else:
+            # Both hands done; finalize entire round
+            # Store a placeholder final (not used directly in settlement here)
+            self._finalize_round_if_done(human_final=self.human_hands[1], human_actions=self.human_actions)
+
+    def on_human_action(self, action: str):
+        if action == A_SPLIT:
+            # Not used here; we have explicit handler
+            return
+
+        # Determine active state (split vs normal)
+        if self.human_split:
+            s = self.human_hands[self.human_active_index]
+            actions_here = self.human_actions_per_hand[self.human_active_index]
+        else:
+            s = self.start_states["Human"]
+            actions_here = self.human_actions
+
         # Validate
         legal = list(self.game.actions(s))
         if action not in legal:
             self._append_log(f"(Illegal or unavailable action: {action})")
             return
-        self.human_actions.append(action)
+        actions_here.append(action)
 
         # Apply
         ns = self.game.result(s, action)
-        self.start_states["Human"] = ns
+        if self.human_split:
+            self.human_hands[self.human_active_index] = ns
+        else:
+            self.start_states["Human"] = ns
 
         # Update human UI
         v, _ = hand_value(ns.player_cards)
         CardRenderer.render_hand(self.pframes["Human"]['card_area'], ns.player_cards)
+        if self.human_split:
+            self.pframes["Human"]['actions'].config(text=f"Actions: {self.human_actions + self.human_actions_per_hand[self.human_active_index]}")
+        else:
+            self.pframes["Human"]['actions'].config(text=f"Actions: {self.human_actions}")
         self.pframes["Human"]['total'].config(text=f"Total: {v}")
-        self.pframes["Human"]['actions'].config(text=f"Actions: {self.human_actions}")
 
         if ns.insurance_allowed:
             self._append_log("Insurance decision pending...")
         else:
             self._append_log(f"Human action: {action}. Now Total={v}.")
 
-        # If terminal or dealer's turn, resolve human and reveal everything
+        # If terminal or dealer's turn, either switch split-hands or finalize
         if self.game.is_terminal(ns) or ns.to_move == 'Dealer':
-            # Ensure dealer plays (in case not already)
             nf = self.game._dealer_play(ns)
-            self.start_states["Human"] = nf  # store final in same dict for simplicity
-            self._finalize_round_if_done(human_final=nf, human_actions=self.human_actions)
+            if self.human_split:
+                self.human_hands[self.human_active_index] = nf
+                # Move to next hand or finalize
+                if self.human_active_index == 0:
+                    self._advance_to_next_split_hand()
+                else:
+                    self._finalize_round_if_done(human_final=nf, human_actions=self.human_actions)
+            else:
+                self.start_states["Human"] = nf
+                self._finalize_round_if_done(human_final=nf, human_actions=self.human_actions)
         else:
-            # Continue; refresh button set
             self._refresh_human_controls()
 
     # ---------- Finalization ----------
@@ -923,16 +1073,39 @@ class BlackjackGUI:
         self.dealer_total.config(text=f"Total: {dv}")
         self._append_log(f"Dealer final: {self.final_dealer} (Total {dv})")
 
-        # Settle Human
+        # Settle Human (supports split)
         if not self.settled_this_round["Human"]:
-            delta = self.game.utility_ev(human_final)
-            res = "WIN" if delta > 0 else ("LOSS" if delta < 0 else "PUSH")
-            self.stacks["Human"] += delta
-            self.rec["Human"][res.lower()] += 1
-            self.pframes["Human"]['result'].config(text=f"Result: {res} ({delta:+.2f})")
-            self.pframes["Human"]['stack'].config(text=f"Stack: {self.stacks['Human']:.2f}")
+            if self.human_split:
+                f1 = self.human_hands[0]
+                f2 = self.human_hands[1]
+                v1, _ = hand_value(f1.player_cards)
+                v2, _ = hand_value(f2.player_cards)
+                d1 = self.game.utility_ev(f1)
+                d2 = self.game.utility_ev(f2)
+                total_delta = d1 + d2
+                # record results
+                r1 = "WIN" if d1 > 0 else ("LOSS" if d1 < 0 else "PUSH")
+                r2 = "WIN" if d2 > 0 else ("LOSS" if d2 < 0 else "PUSH")
+                self.stacks["Human"] += total_delta
+                # Update W/L/P per hand
+                self.rec["Human"][r1.lower()] += 1
+                self.rec["Human"][r2.lower()] += 1
+                self.pframes["Human"]['result'].config(
+                    text=f"Result: [{r1} {d1:+.2f}] & [{r2} {d2:+.2f}]  => Total {total_delta:+.2f}"
+                )
+                self.pframes["Human"]['stack'].config(text=f"Stack: {self.stacks['Human']:.2f}")
+                self._append_log(f"Human split results: Hand1 {f1.player_cards} (Total {v1}) -> {r1} {d1:+.2f}; "
+                                 f"Hand2 {f2.player_cards} (Total {v2}) -> {r2} {d2:+.2f} | "
+                                 f"Round Total {total_delta:+.2f} | Stack={self.stacks['Human']:.2f}")
+            else:
+                delta = self.game.utility_ev(human_final)
+                res = "WIN" if delta > 0 else ("LOSS" if delta < 0 else "PUSH")
+                self.stacks["Human"] += delta
+                self.rec["Human"][res.lower()] += 1
+                self.pframes["Human"]['result'].config(text=f"Result: {res} ({delta:+.2f})")
+                self.pframes["Human"]['stack'].config(text=f"Stack: {self.stacks['Human']:.2f}")
+                self._append_log(f"Human final: {human_final.player_cards} -> {res} {delta:+.2f} | Stack={self.stacks['Human']:.2f}")
             self.settled_this_round["Human"] = True
-            self._append_log(f"Human final: {human_final.player_cards} -> {res} {delta:+.2f} | Stack={self.stacks['Human']:.2f}")
 
         # Reveal & settle AI players
         for tag in ("MCTS-Profit","MCTS-Win","Expecti-Win"):
