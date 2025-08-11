@@ -95,19 +95,14 @@ class Blackjack:
     def _precompute_dealer_hand(self, upcard: str, shoe_after_dealer: Counter):
         dealer = [upcard, self._round_hole]
         shoe = shoe_after_dealer.copy()
-        # Dealer hits while total < 17; stands on 17+
+        # Dealer hits while total < 17; stands on 17+ (hits soft 17 only if configured)
         while True:
             dv, soft = hand_value(tuple(dealer))
-            # Dealer hits soft 17 only if configured
             if dv > 17 or (dv == 17 and not (soft and self.H17)):
                 break
-            if dv == 17 and soft and self.H17:
-                pass
-            if dv < 17 or (dv == 17 and soft and self.H17):
-                rank, shoe = self._draw_from_shoe(shoe)
-                dealer.append(rank)
-                continue
-            break
+            # hit if <17, or soft 17 when H17 is True
+            rank, shoe = self._draw_from_shoe(shoe)
+            dealer.append(rank)
         self._round_dealer_hits = tuple(dealer[2:])
         self._round_final_dealer = tuple(dealer)
 
@@ -554,11 +549,62 @@ def reconstruct_final_dealer(game: Blackjack) -> Tuple[str, ...]:
     return game._round_final_dealer or ('?', '?')
 
 # =========================
-# Tkinter GUI for Human vs 3 AI players
+# Tkinter GUI for Human vs 3 AI players (with card pictures)
 # =========================
 
 import tkinter as tk
 from tkinter import ttk
+
+# Simple renderer that draws card "pictures" on Canvas (no external image files)
+class CardRenderer:
+    CARD_W = 70
+    CARD_H = 100
+    PADDING_X = 6
+
+    SUITS = ['♠', '♥', '♦', '♣']
+    SUIT_COLORS = {'♠': '#111', '♣': '#111', '♥': '#C8192E', '♦': '#C8192E'}
+
+    @staticmethod
+    def suit_for_rank(rank: str) -> str:
+        # Deterministic mapping rank -> suit just for visuals
+        idx = RANKS.index(rank) % 4 if rank in RANKS else 0
+        return CardRenderer.SUITS[idx]
+
+    @staticmethod
+    def draw_card(parent, rank: str, face_down: bool = False) -> tk.Canvas:
+        w, h = CardRenderer.CARD_W, CardRenderer.CARD_H
+        c = tk.Canvas(parent, width=w, height=h, bg="#0B5D2A", highlightthickness=0)  # table green around edges
+        # Card background
+        if face_down:
+            c.create_rectangle(4, 4, w-4, h-4, fill="#2B6CB0", outline="#0F3A6B", width=2)
+            # simple back pattern
+            for i in range(10, w-10, 10):
+                c.create_line(i, 8, i-20, h-8, fill="#E6EEF9")
+            c.create_text(w/2, h/2, text="♜", font=("Segoe UI Symbol", 28, "bold"), fill="#E6EEF9")
+        else:
+            c.create_rectangle(4, 4, w-4, h-4, fill="#FFFFFF", outline="#333", width=2)
+            # choose suit deterministically from rank
+            suit = CardRenderer.suit_for_rank(rank)
+            col = CardRenderer.SUIT_COLORS[suit]
+            # corner rank
+            c.create_text(12, 12, text=rank, anchor="nw", font=("Consolas", 12, "bold"), fill=col)
+            c.create_text(w-12, h-12, text=rank, anchor="se", font=("Consolas", 12, "bold"), fill=col)
+            # suit center
+            big_font = ("Segoe UI Symbol", 26, "bold") if rank != '10' else ("Segoe UI Symbol", 24, "bold")
+            c.create_text(w/2, h/2, text=suit, font=big_font, fill=col)
+        return c
+
+    @staticmethod
+    def render_hand(frame: ttk.Frame, cards: Tuple[str, ...], hide_indexes: Optional[set] = None):
+        hide_indexes = hide_indexes or set()
+        # Clear old
+        for child in frame.winfo_children():
+            child.destroy()
+        # Draw new
+        for i, rank in enumerate(cards):
+            face_down = i in hide_indexes
+            card_canvas = CardRenderer.draw_card(frame, rank, face_down=face_down)
+            card_canvas.pack(side="left", padx=(0 if i == 0 else CardRenderer.PADDING_X), pady=2)
 
 class BlackjackGUI:
     def __init__(self, root,
@@ -585,7 +631,6 @@ class BlackjackGUI:
         self.current_round = 0
         self.dealer_public: Tuple[str, Optional[str]] = ("?", None)
         self.final_dealer: Tuple[str, ...] = ("?", "?")
-        self.hole_committed: Optional[str] = None
 
         self.start_states: Dict[str, BJState] = {}
         self.final_states: Dict[str, BJState] = {}
@@ -598,7 +643,7 @@ class BlackjackGUI:
 
     # ---------- UI Layout ----------
     def _build_ui(self):
-        self.root.geometry("980x700")
+        self.root.geometry("1040x760")
         container = ttk.Frame(self.root, padding=10)
         container.pack(fill="both", expand=True)
 
@@ -616,14 +661,15 @@ class BlackjackGUI:
         dealer_frame = ttk.Labelframe(container, text="Dealer", padding=10)
         dealer_frame.pack(fill="x", pady=6)
 
-        self.dealer_up = ttk.Label(dealer_frame, text="Upcard: ?", font=("Consolas", 14))
+        info_row = ttk.Frame(dealer_frame)
+        info_row.pack(fill="x")
+        self.dealer_up = ttk.Label(info_row, text="Upcard: ?", font=("Consolas", 14))
         self.dealer_up.pack(side="left", padx=8)
-
-        self.dealer_hole = ttk.Label(dealer_frame, text="Hole: (hidden)", font=("Consolas", 14))
-        self.dealer_hole.pack(side="left", padx=8)
-
-        self.dealer_total = ttk.Label(dealer_frame, text="Total: -", font=("Consolas", 14))
+        self.dealer_total = ttk.Label(info_row, text="Total: -", font=("Consolas", 14))
         self.dealer_total.pack(side="left", padx=8)
+
+        self.dealer_cards_frame = ttk.Frame(dealer_frame)
+        self.dealer_cards_frame.pack(fill="x", pady=(8,0))
 
         # Players area
         players_frame = ttk.Frame(container)
@@ -639,9 +685,6 @@ class BlackjackGUI:
             top.pack(fill="x")
 
             self.pframes.setdefault(tag, {})
-            self.pframes[tag]['cards'] = ttk.Label(top, text="Cards: []", font=("Consolas", 12))
-            self.pframes[tag]['cards'].pack(side="left", padx=5)
-
             self.pframes[tag]['total'] = ttk.Label(top, text="Total: -", font=("Consolas", 12))
             self.pframes[tag]['total'].pack(side="left", padx=10)
 
@@ -653,6 +696,11 @@ class BlackjackGUI:
 
             self.pframes[tag]['stack'] = ttk.Label(top, text=f"Stack: {self.stacks[tag]:.2f}", font=("Consolas", 12, "bold"))
             self.pframes[tag]['stack'].pack(side="right", padx=5)
+
+            # Card picture row
+            cards_row = ttk.Frame(frame)
+            cards_row.pack(fill="x", pady=(8,0))
+            self.pframes[tag]['card_area'] = cards_row
 
             if tag == "Human":
                 btns = ttk.Frame(frame)
@@ -678,7 +726,7 @@ class BlackjackGUI:
     # ---------- Helpers ----------
     def _set_human_buttons(self, enabled: bool, insurance_phase: Optional[bool]=None, can_double: bool=False):
         state = ("!disabled" if enabled else "disabled")
-        # Default disable all
+        # Default disable/enable all
         for b in (getattr(self, 'btn_ins', None),
                   getattr(self, 'btn_skip_ins', None),
                   getattr(self, 'btn_hit', None),
@@ -704,9 +752,6 @@ class BlackjackGUI:
         self.log.insert("end", msg + "\n")
         self.log.see("end")
 
-    def _format_cards(self, cards: Tuple[str, ...]) -> str:
-        return "[" + ", ".join(cards) + "]"
-
     # ---------- Round lifecycle ----------
     def start_round(self):
         # Reset UI for new round
@@ -727,13 +772,14 @@ class BlackjackGUI:
 
         # Clear UI fields
         for tag in self.tags:
-            self.pframes[tag]['cards'].config(text="Cards: []")
+            CardRenderer.render_hand(self.pframes[tag]['card_area'], ())
             self.pframes[tag]['total'].config(text="Total: -")
             self.pframes[tag]['actions'].config(text="Actions: -")
             self.pframes[tag]['result'].config(text="Result: -")
+            self.pframes[tag]['stack'].config(text=f"Stack: {self.stacks[tag]:.2f}")
         self.dealer_up.config(text="Upcard: ?")
-        self.dealer_hole.config(text="Hole: (hidden)")
         self.dealer_total.config(text="Total: -")
+        CardRenderer.render_hand(self.dealer_cards_frame, ())
 
         # Prepare round
         random.seed(secrets.randbits(64))
@@ -748,6 +794,8 @@ class BlackjackGUI:
         self.final_dealer = reconstruct_final_dealer(self.game)
 
         self.dealer_up.config(text=f"Upcard: {d1}")
+        # Render dealer up + face-down hole
+        CardRenderer.render_hand(self.dealer_cards_frame, (d1, 'X'), hide_indexes={1})
         self._append_log(f"Dealer Upcard: {d1}. Hole is hidden.")
 
         # Deal each player from a cloned shoe
@@ -779,9 +827,8 @@ class BlackjackGUI:
         # Show human starting hand
         hstart = self.start_states["Human"]
         hv, _ = hand_value(hstart.player_cards)
-        self.pframes["Human"]['cards'].config(text=f"Cards: {self._format_cards(hstart.player_cards)}")
+        CardRenderer.render_hand(self.pframes["Human"]['card_area'], hstart.player_cards)
         self.pframes["Human"]['total'].config(text=f"Total: {hv}")
-        self.pframes["Human"]['stack'].config(text=f"Stack: {self.stacks['Human']:.2f}")
         self.pframes["Human"]['actions'].config(text="Actions: (your move)")
         self._append_log(f"Human starting hand: {hstart.player_cards} (Total {hv})")
 
@@ -789,9 +836,8 @@ class BlackjackGUI:
         for tag in ("MCTS-Profit","MCTS-Win","Expecti-Win"):
             s0 = self.start_states[tag]
             v0, _ = hand_value(s0.player_cards)
-            self.pframes[tag]['cards'].config(text=f"Cards: {self._format_cards(s0.player_cards)}")
+            CardRenderer.render_hand(self.pframes[tag]['card_area'], s0.player_cards)
             self.pframes[tag]['total'].config(text=f"Total: {v0}")
-            self.pframes[tag]['stack'].config(text=f"Stack: {self.stacks[tag]:.2f}")
             self.pframes[tag]['actions'].config(text="Actions: (pending)")
             self.pframes[tag]['result'].config(text="Result: (pending)")
             self._append_log(f"{tag} starting hand: {s0.player_cards} (Total {v0})")
@@ -850,7 +896,7 @@ class BlackjackGUI:
 
         # Update human UI
         v, _ = hand_value(ns.player_cards)
-        self.pframes["Human"]['cards'].config(text=f"Cards: {self._format_cards(ns.player_cards)}")
+        CardRenderer.render_hand(self.pframes["Human"]['card_area'], ns.player_cards)
         self.pframes["Human"]['total'].config(text=f"Total: {v}")
         self.pframes["Human"]['actions'].config(text=f"Actions: {self.human_actions}")
 
@@ -871,8 +917,8 @@ class BlackjackGUI:
 
     # ---------- Finalization ----------
     def _finalize_round_if_done(self, human_final: BJState, human_actions: List[str]):
-        # Reveal dealer
-        self.dealer_hole.config(text=f"Hole: {self.game._round_hole}")
+        # Reveal dealer (render all face-up)
+        CardRenderer.render_hand(self.dealer_cards_frame, self.final_dealer)
         dv, _ = hand_value(self.final_dealer)
         self.dealer_total.config(text=f"Total: {dv}")
         self._append_log(f"Dealer final: {self.final_dealer} (Total {dv})")
@@ -901,6 +947,7 @@ class BlackjackGUI:
                 self.pframes[tag]['actions'].config(text=f"Actions: {a}")
                 self.pframes[tag]['result'].config(text=f"Result: {res} ({delta:+.2f})")
                 self.pframes[tag]['stack'].config(text=f"Stack: {self.stacks[tag]:.2f}")
+                CardRenderer.render_hand(self.pframes[tag]['card_area'], f.player_cards)
                 self._append_log(f"{tag} final: {f.player_cards} (Total {v}) -> {res} {delta:+.2f} | Stack={self.stacks[tag]:.2f}")
                 self.settled_this_round[tag] = True
 
@@ -916,9 +963,8 @@ if __name__ == "__main__":
     root = tk.Tk()
     # TTK theme tweaks (optional)
     try:
-        from tkinter import ttk
         style = ttk.Style()
-        # Use a platform-appropriate theme if available
+        # Use current default theme
         style.theme_use(style.theme_use())
     except Exception:
         pass
@@ -928,7 +974,7 @@ if __name__ == "__main__":
         decks=6,
         base_bet=100,
         starting_chips=1000,
-        iters=3000,
+        iters=2500,
         depth=6,
         h17=False  # Dealer stands on all 17
     )
