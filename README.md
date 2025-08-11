@@ -1,4 +1,4 @@
-# Blackjack AI (Stats)
+# Blackjack AI (Stats) Version (1.2)
 
 This repo contains a **single-file** Blackjack engine plus three AI agents:
 
@@ -94,4 +94,5 @@ if __name__ == "__main__":
     )
 ```
 ## Notes
-- The dealer hand is precomputed once per round so every agent faces the same final dealer outcome—apple-to-apples comparisons.
+- The dealer hand is precomputed once per round, so every agent faces the same final dealer outcome—making results comparable.
+- Per-round delta plots and per-round console logs are intentionally disabled; only a single summary plot is shown at the end.
