@@ -471,15 +471,13 @@ def reconstruct_final_dealer(game: Blackjack) -> Tuple[str, ...]:
     return game._round_final_dealer or ('?', '?')
 
 # =========================
-# Plotting (only at the end)
+# Plotting (only at the end; no per-round delta plot)
 # =========================
 
 def plot_summary(stack_hist: Dict[str, List[float]],
-                 delta_hist: Dict[str, List[float]],
                  save_dir: Optional[str] = None):
-    """Create summary plots after all rounds:
-       1) Line chart of chip stacks over rounds
-       2) Line chart of per-round Δchips per agent
+    """Create a summary plot after all rounds:
+       - Line chart of chip stacks over rounds
     """
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
@@ -487,7 +485,7 @@ def plot_summary(stack_hist: Dict[str, List[float]],
     rounds = len(next(iter(stack_hist.values()), []))
     x = list(range(1, rounds + 1))
 
-    # 1) Stacks over time
+    # Stacks over time
     plt.figure()
     for tag, series in stack_hist.items():
         plt.plot(x, series, label=tag)
@@ -498,19 +496,19 @@ def plot_summary(stack_hist: Dict[str, List[float]],
     if save_dir:
         plt.savefig(os.path.join(save_dir, "stacks_over_time.png"), bbox_inches="tight")
 
-    # 2) Per-round deltas
-    plt.figure()
-    for tag, series in delta_hist.items():
-        plt.plot(x, series, label=tag)
-    plt.title("Per-Round Δ Chips")
-    plt.xlabel("Round")
-    plt.ylabel("Δ Chips")
-    plt.legend()
-    if save_dir:
-        plt.savefig(os.path.join(save_dir, "deltas_over_time.png"), bbox_inches="tight")
-
     # Show at the end (even if saved)
     plt.show()
+
+# =========================
+# Simple console loading bar
+# =========================
+
+def progress_bar(current: int, total: int, width: int = 40, prefix: str = "Playing hands") -> None:
+    filled = int(width * current / total)
+    bar = "█" * filled + "-" * (width - filled)
+    print(f"\r{prefix}: |{bar}| {current}/{total}", end="", flush=True)
+    if current == total:
+        print()  # newline at completion
 
 # =========================
 # Tournament: shared dealer, static bet, hidden hole
@@ -526,10 +524,12 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4,
     rec    = {a: {'win':0,'loss':0,'push':0} for a in agents}
 
     # histories for end-of-run plotting
-    stack_hist = {a: [] for a in agents}    # running stacks after each round
-    delta_hist = {a: [] for a in agents}    # per-round chip changes
+    stack_hist = {a: [] for a in agents}  # running stacks after each round
 
     for rnd in range(1, rounds+1):
+        # update loading bar
+        progress_bar(rnd - 1, rounds)
+
         random.seed(secrets.randbits(64))
         base_shoe = make_shoe(decks)
 
@@ -570,22 +570,21 @@ def run_comparison(rounds=10, iters=2500, depth=6, decks=4,
             elif delta < 0: rec[tag]['loss'] += 1
             else:           rec[tag]['push'] += 1
             stacks[tag] += delta
-            return delta
 
-        d1c = settle('MCTS-Profit', f1)
-        d2c = settle('MCTS-Win',    f2)
-        d3c = settle('Expecti-Win', f3)
+        settle('MCTS-Profit', f1)
+        settle('MCTS-Win',    f2)
+        settle('Expecti-Win', f3)
 
         # record histories
-        delta_hist['MCTS-Profit'].append(d1c)
-        delta_hist['MCTS-Win'   ].append(d2c)
-        delta_hist['Expecti-Win'].append(d3c)
         for a in agents:
             stack_hist[a].append(stacks[a])
 
+    # complete loading bar
+    progress_bar(rounds, rounds)
+
     # plots only once, after the tournament
     if plot:
-        plot_summary(stack_hist, delta_hist, save_dir=save_dir)
+        plot_summary(stack_hist, save_dir=save_dir)
 
     # final chip stacks only (no per-round prints)
     print("\n==== Final Chip Stacks ====")
@@ -601,6 +600,6 @@ if __name__ == "__main__":
         decks=6,
         starting_chips=1000,
         base_bet=100,
-        plot=True,            # show summary plots once at the end
+        plot=True,            # show summary plot once at the end
         save_dir="plots"      # set to None to only display; or a folder name to save PNGs
     )
